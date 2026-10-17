@@ -1,0 +1,35 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+reports/*.json
+reports/pytest-smoke/
+
+# Temporary uploads / generated files
+tmp/
+uploads/
+*.tmp
+.pgdata/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

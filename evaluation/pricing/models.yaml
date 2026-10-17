@@ -1,0 +1,13 @@
+# Configurable pricing (USD per 1M tokens). Verify against your provider; unlisted models → no cost.
+version: "2026-01"
+models:
+  gpt-6.1-sol:
+    input_per_million: 0.0
+    output_per_million: 0.0
+    note: "Set real prices when verified with provider"
+  text-embedding-3-small:
+    input_per_million: 0.02
+    output_per_million: 0.0
+  openai/text-embedding-3-small:
+    input_per_million: 0.02
+    output_per_million: 0.0

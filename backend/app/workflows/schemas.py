@@ -19,6 +19,7 @@ class EvidenceSourceType(StrEnum):
 
 class RetrievalStrategy(StrEnum):
     SEMANTIC = "semantic"
+    HYBRID = "hybrid"
     BROADEN_SEMANTIC = "broaden_semantic"
     FULLTEXT = "fulltext"
     NEIGHBOR_EXPAND = "neighbor_expand"
@@ -145,7 +146,7 @@ def assessment_to_strategy(assessment: EvidenceAssessment) -> RetrievalStrategy 
     mapping: dict[str, RetrievalStrategy] = {
         "rewrite_query": RetrievalStrategy.SEMANTIC,
         "broaden_semantic_search": RetrievalStrategy.BROADEN_SEMANTIC,
-        "use_hybrid_search": RetrievalStrategy.FULLTEXT,
+        "use_hybrid_search": RetrievalStrategy.HYBRID,
         "expand_neighboring_chunks": RetrievalStrategy.NEIGHBOR_EXPAND,
         "retrieve_document_section": RetrievalStrategy.SECTION_FOCUS,
     }

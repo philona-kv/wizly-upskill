@@ -6,11 +6,14 @@ chunks are never loaded into Python for filtering.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
+
+RRF_RANK_CONSTANT = 60
 
 from sqlalchemy import func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,6 +85,29 @@ class RetrievedChunk:
     distance: float
 
 
+def reciprocal_rank_fusion(
+    ranked_lists: Sequence[Sequence[RetrievedChunk]],
+    *,
+    top_k: int,
+    rrf_k: int = RRF_RANK_CONSTANT,
+) -> list[RetrievedChunk]:
+    """Merge ranked lists with reciprocal rank fusion (chunk may appear in multiple lists)."""
+    scores: dict[uuid.UUID, float] = {}
+    by_id: dict[uuid.UUID, RetrievedChunk] = {}
+    for ranked in ranked_lists:
+        for rank, chunk in enumerate(ranked, start=1):
+            scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + 1.0 / (rrf_k + rank)
+            by_id[chunk.chunk_id] = chunk
+    if not scores:
+        return []
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    fused: list[RetrievedChunk] = []
+    for chunk_id, score in ordered[:top_k]:
+        base = by_id[chunk_id]
+        fused.append(replace(base, distance=1.0 / score))
+    return fused
+
+
 def _rows_to_chunks(rows) -> list[RetrievedChunk]:
     return [
         RetrievedChunk(
@@ -136,6 +162,15 @@ class RetrievalService:
                 limit=max(top_k, max_candidates),
                 retrieval_context=ctx,
             )
+        if strategy == RetrievalStrategy.HYBRID:
+            return await self.retrieve_hybrid(
+                session,
+                owner_id,
+                query,
+                top_k=top_k,
+                max_candidates=max_candidates,
+                retrieval_context=ctx,
+            )
         if strategy == RetrievalStrategy.NEIGHBOR_EXPAND and focus_chunk_ids:
             return await self.retrieve_neighbors(
                 session, owner_id, list(focus_chunk_ids), retrieval_context=ctx
@@ -155,13 +190,12 @@ class RetrievalService:
             session, owner_id, query, top_k, max_candidates, retrieval_context=ctx
         )
 
-    async def _semantic(
+    async def _semantic_candidates(
         self,
         session: AsyncSession,
         owner_id: uuid.UUID,
         query: str,
-        top_k: int,
-        max_candidates: int,
+        limit: int,
         *,
         retrieval_context: RetrievalContext | None = None,
     ) -> list[RetrievedChunk]:
@@ -187,16 +221,66 @@ class RetrievalService:
                 )
             )
             .order_by(distance)
-            .limit(max_candidates)
+            .limit(limit)
         )
         rows = (await session.execute(stmt)).all()
-        hits = _rows_to_chunks(rows)
+        return _rows_to_chunks(rows)
+
+    async def _semantic(
+        self,
+        session: AsyncSession,
+        owner_id: uuid.UUID,
+        query: str,
+        top_k: int,
+        max_candidates: int,
+        *,
+        retrieval_context: RetrievalContext | None = None,
+    ) -> list[RetrievedChunk]:
+        hits = await self._semantic_candidates(
+            session,
+            owner_id,
+            query,
+            max_candidates,
+            retrieval_context=retrieval_context,
+        )
         selected = hits[:top_k]
         logger.info(
             "retrieval_complete",
             extra={"candidates": len(hits), "selected": len(selected), "owner_id": str(owner_id)},
         )
         return selected
+
+    async def retrieve_hybrid(
+        self,
+        session: AsyncSession,
+        owner_id: uuid.UUID,
+        query: str,
+        *,
+        top_k: int,
+        max_candidates: int,
+        retrieval_context: RetrievalContext | None = None,
+    ) -> list[RetrievedChunk]:
+        ctx = retrieval_context or RetrievalContext.twin()
+        limit = max(top_k, max_candidates)
+        semantic_hits, fulltext_hits = await asyncio.gather(
+            self._semantic_candidates(
+                session, owner_id, query, limit, retrieval_context=ctx
+            ),
+            self.retrieve_fulltext(
+                session, owner_id, query, limit=limit, retrieval_context=ctx
+            ),
+        )
+        fused = reciprocal_rank_fusion([semantic_hits, fulltext_hits], top_k=top_k)
+        logger.info(
+            "hybrid_retrieval_complete",
+            extra={
+                "semantic": len(semantic_hits),
+                "fulltext": len(fulltext_hits),
+                "selected": len(fused),
+                "owner_id": str(owner_id),
+            },
+        )
+        return fused
 
     async def retrieve_fulltext(
         self,

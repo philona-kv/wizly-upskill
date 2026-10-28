@@ -181,7 +181,7 @@ def make_nodes(deps: WorkflowDeps):
             "query_plan": plan.model_dump(mode="json"),
             "standalone_query": plan.standalone_query,
             "selected_sources": sources,
-            "retrieval_strategy": RetrievalStrategy.SEMANTIC.value,
+            "retrieval_strategy": RetrievalStrategy.HYBRID.value,
             "retrieval_attempt": state.get("retrieval_attempt") or 1,
         }
 

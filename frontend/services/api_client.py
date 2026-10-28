@@ -423,7 +423,20 @@ class ApiClient:
         self._request("DELETE", f"/conversations/{conversation_id}")
 
     def get_conversation_summary(self, conversation_id: str) -> dict[str, Any]:
-        return self._json(self._request("GET", f"/conversations/{conversation_id}/summary"))
+        try:
+            return self._json(
+                self._request("GET", f"/conversations/{conversation_id}/summary")
+            )
+        except ApiError as exc:
+            # Older APIs returned 404 when no summary existed yet.
+            if exc.status_code == 404:
+                return {
+                    "conversation_id": conversation_id,
+                    "summary_text": None,
+                    "version": 0,
+                    "summarized_message_count": 0,
+                }
+            raise
 
     def list_memories(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         return self._json(

@@ -35,15 +35,6 @@ ai_twin_pages = [
 
 playground_pages = [
     st.Page("pages/playground/library.py", title="Document Library", icon=":material/folder:"),
-    st.Page("pages/playground/query_lab.py", title="Query Lab", icon=":material/science:"),
-    st.Page(
-        "pages/playground/experiments.py", title="Prompt Experiments", icon=":material/tune:"
-    ),
-    st.Page(
-        "pages/playground/evaluation.py",
-        title="Evaluation Results",
-        icon=":material/analytics:",
-    ),
 ]
 
 pg = st.navigation({"AI Twin": ai_twin_pages, "Playground": playground_pages})
@@ -67,7 +58,7 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.caption("Playground: private docs, scoped retrieval, prompt experiments.")
+    st.caption("Playground: private docs and promotion to global.")
     if details.get("development_identity", True):
         st.warning(
             "**Development mode.** All requests use a single development identity. "

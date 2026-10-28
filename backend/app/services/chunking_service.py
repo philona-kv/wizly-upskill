@@ -1,22 +1,23 @@
-"""Token-aware chunking with page provenance.
+"""Semantic chunking with page provenance and token bounds.
 
 Algorithm:
-1. Each page is split into paragraphs (blank lines) and paragraphs into sentences.
-   Every resulting *unit* remembers the page it came from.
-2. Units longer than the chunk size are split on word boundaries (and, only for a
-   single pathological "word", on token boundaries).
-3. Units are packed greedily into chunks of at most ``chunk_size`` tokens.
-4. The next chunk starts with whole trailing units of the previous chunk totalling at
-   most ``overlap`` tokens (falling back to a token tail when the last unit alone is
-   larger than the overlap).
-5. ``page_start``/``page_end`` are the min/max pages of the units in a chunk, and
-   ``token_count`` is measured on the final chunk text.
+1. Each page is split into paragraphs and sentences (structure is used only to form
+   *units*, not to choose chunk boundaries).
+2. Sentence embeddings are computed for every unit; consecutive cosine similarities
+   define semantic cohesion.
+3. Breakpoints are placed where similarity is a local minimum and at or below a
+   configurable percentile across the document (topic shifts).
+4. Adjacent semantic segments are merged up to ``chunk_size`` tokens; oversized
+   segments are split on word/token boundaries.
+5. Chunks are emitted with trailing-unit overlap (at most ``overlap`` tokens).
+6. ``page_start`` / ``page_end`` and ``token_count`` match the final chunk text.
 
-Pure and synchronous; call via ``asyncio.to_thread`` for large documents.
+Ingestion calls ``chunk`` asynchronously (requires an ``Embedder``).
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from functools import lru_cache
 
 import tiktoken
 
+from app.services.embedding_service import Embedder
 from app.services.pdf_extractor import PageText
 
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
@@ -56,23 +58,41 @@ def get_encoding(model: str) -> tiktoken.Encoding:
         return tiktoken.get_encoding("cl100k_base")
 
 
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
 class ChunkingService:
-    def __init__(self, chunk_size: int, overlap: int, model: str = "text-embedding-3-small"):
+    def __init__(
+        self,
+        chunk_size: int,
+        overlap: int,
+        embedder: Embedder,
+        *,
+        breakpoint_percentile: float = 0.25,
+        encoding_model: str = "text-embedding-3-small",
+    ) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
         if not 0 <= overlap < chunk_size:
             raise ValueError("overlap must be >= 0 and smaller than chunk_size")
+        if not 0.0 <= breakpoint_percentile <= 1.0:
+            raise ValueError("breakpoint_percentile must be between 0 and 1")
         self.chunk_size = chunk_size
         self.overlap = overlap
-        self._enc = get_encoding(model)
+        self._embedder = embedder
+        self._breakpoint_percentile = breakpoint_percentile
+        self._enc = get_encoding(encoding_model)
 
     def count_tokens(self, text: str) -> int:
         return len(self._enc.encode(text, disallowed_special=()))
 
-    # -- unit construction -------------------------------------------------
-
     def _split_oversized(self, text: str) -> list[str]:
-        """Split text that exceeds chunk_size on word boundaries."""
         pieces: list[str] = []
         current: list[str] = []
         current_tokens = 0
@@ -119,8 +139,6 @@ class ChunkingService:
                         first = False
         return units
 
-    # -- packing -----------------------------------------------------------
-
     @staticmethod
     def _join(units: Sequence[_Unit]) -> str:
         out: list[str] = []
@@ -132,7 +150,6 @@ class ChunkingService:
 
     @staticmethod
     def _estimate(units: Sequence[_Unit]) -> int:
-        # +1 per separator; the exact count is re-measured on the joined text.
         return sum(u.tokens for u in units) + max(len(units) - 1, 0)
 
     def _overlap_units(self, units: Sequence[_Unit]) -> list[_Unit]:
@@ -148,45 +165,115 @@ class ChunkingService:
             total += cost
         if tail:
             return tail
-        # Last unit alone exceeds the overlap: carry its final `overlap` tokens.
         last = units[-1]
         tokens = self._enc.encode(last.text, disallowed_special=())[-self.overlap :]
         text = self._enc.decode(tokens).strip()
         return [_Unit(text, last.page, len(tokens), True)] if text else []
 
-    def chunk(self, pages: Iterable[PageText]) -> list[TextChunk]:
+    def _similarity_threshold(self, similarities: list[float]) -> float:
+        if not similarities:
+            return 0.0
+        ordered = sorted(similarities)
+        idx = int(self._breakpoint_percentile * (len(ordered) - 1))
+        return ordered[idx]
+
+    def _semantic_break_after(self, similarities: list[float]) -> set[int]:
+        """Indices i: prefer a break between unit i and unit i+1."""
+        if not similarities:
+            return set()
+        threshold = min(self._similarity_threshold(similarities), 0.35)
+        breaks: set[int] = set()
+        for i, sim in enumerate(similarities):
+            left = similarities[i - 1] if i > 0 else sim + 1.0
+            right = similarities[i + 1] if i < len(similarities) - 1 else sim + 1.0
+            is_local_min = sim < left and sim < right
+            if is_local_min and sim <= threshold:
+                breaks.add(i)
+        return breaks
+
+    def _segments_from_units(
+        self, units: list[_Unit], break_after: set[int]
+    ) -> list[list[_Unit]]:
+        segments: list[list[_Unit]] = []
+        current: list[_Unit] = []
+        for idx, unit in enumerate(units):
+            current.append(unit)
+            if idx in break_after:
+                segments.append(current)
+                current = []
+        if current:
+            segments.append(current)
+        return segments or [units]
+
+    def _split_oversized_segments(self, segments: list[list[_Unit]]) -> list[list[_Unit]]:
+        out: list[list[_Unit]] = []
+        for segment in segments:
+            if self._estimate(segment) <= self.chunk_size:
+                out.append(segment)
+                continue
+            batch: list[_Unit] = []
+            for unit in segment:
+                if batch and self._estimate(batch + [unit]) > self.chunk_size:
+                    out.append(batch)
+                    batch = self._overlap_units(batch)
+                batch.append(unit)
+                while batch and self._estimate(batch) > self.chunk_size and len(batch) > 1:
+                    batch.pop(0)
+            if batch:
+                out.append(batch)
+        return out
+
+    def _apply_overlap_between_segments(
+        self, segments: list[list[_Unit]]
+    ) -> list[list[_Unit]]:
+        if not segments:
+            return []
+        packed: list[list[_Unit]] = []
+        for segment in segments:
+            group = list(segment)
+            if packed and self.overlap:
+                prefix = self._overlap_units(packed[-1])
+                group = prefix + group
+                while (
+                    len(group) > len(segment)
+                    and self._estimate(group) > self.chunk_size
+                ):
+                    group.pop(0)
+            packed.append(group)
+        return packed
+
+    async def chunk(self, pages: Iterable[PageText]) -> list[TextChunk]:
         units = self._units(pages)
         if not units:
             return []
 
-        # Each group is (units, number of leading units carried over as overlap).
-        groups: list[tuple[list[_Unit], int]] = []
-        current: list[_Unit] = []
-        carried = 0
-        has_new_content = False
-        for unit in units:
-            if has_new_content and self._estimate([*current, unit]) > self.chunk_size:
-                groups.append((current, carried))
-                current = self._overlap_units(current)
-                carried = len(current)
-                has_new_content = False
-            current.append(unit)
-            has_new_content = True
-            # Keep overlap from pushing a chunk past the limit.
-            while carried and self._estimate(current) > self.chunk_size:
-                current.pop(0)
-                carried -= 1
-        if has_new_content:
-            groups.append((current, carried))
+        if self._estimate(units) <= self.chunk_size:
+            content = self._join(units)
+            return [
+                TextChunk(
+                    chunk_index=0,
+                    content=content,
+                    page_start=min(u.page for u in units),
+                    page_end=max(u.page for u in units),
+                    token_count=self.count_tokens(content),
+                )
+            ]
+
+        vectors = await self._embedder.embed([u.text for u in units])
+        similarities = [
+            _cosine(vectors[i], vectors[i + 1]) for i in range(len(vectors) - 1)
+        ]
+        break_after = self._semantic_break_after(similarities)
+        segments = self._segments_from_units(units, break_after)
+        segments = self._split_oversized_segments(segments)
+        groups = self._apply_overlap_between_segments(segments)
 
         chunks: list[TextChunk] = []
-        for group, carried in groups:
+        for group in groups:
             content = self._join(group)
             token_count = self.count_tokens(content)
-            # Separator tokenisation can exceed the estimate; only ever drop overlap.
-            while token_count > self.chunk_size and carried:
+            while token_count > self.chunk_size and len(group) > 1:
                 group = group[1:]
-                carried -= 1
                 content = self._join(group)
                 token_count = self.count_tokens(content)
             chunks.append(

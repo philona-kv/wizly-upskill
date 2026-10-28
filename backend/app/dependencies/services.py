@@ -17,6 +17,7 @@ from app.services.answer_repair import AnswerRepairService
 from app.services.chat_postprocess import ChatPostProcessService
 from app.services.chat_service import ChatService
 from app.services.chunking_service import ChunkingService
+from app.services.pdf_extractor import PdfExtractOptions
 from app.services.context_builder import ContextBuilder
 from app.services.conversation_context_builder import ConversationContextBuilder
 from app.services.conversation_summary_service import ConversationSummaryService
@@ -81,10 +82,21 @@ def get_ingestion_service(
         ChunkingService(
             settings.chunk_size_tokens,
             settings.chunk_overlap_tokens,
-            settings.openai_embedding_model,
+            embedder,
+            breakpoint_percentile=settings.semantic_chunk_breakpoint_percentile,
+            encoding_model=settings.openai_embedding_model,
         ),
         embedder,
         stale_after_seconds=settings.ingestion_stale_after_seconds,
+        pdf_extract_options=PdfExtractOptions(
+            page_ocr_enabled=settings.pdf_page_ocr_enabled,
+            page_ocr_scale=settings.pdf_page_ocr_scale,
+            page_ocr_min_text_chars=settings.pdf_page_ocr_min_text_chars,
+            embedded_image_ocr_enabled=settings.pdf_embedded_image_ocr_enabled,
+            embedded_image_min_pixels=settings.pdf_embedded_image_min_pixels,
+            max_embedded_images_per_page=settings.pdf_max_embedded_images_per_page,
+            table_extraction_enabled=settings.pdf_table_extraction_enabled,
+        ),
     )
 
 

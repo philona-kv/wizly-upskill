@@ -44,7 +44,7 @@ These are the backend services in `backend/app/services/`:
 - `storage_service.py` is the Supabase Storage REST client (via httpx). It streams uploads and downloads, and its deletes are idempotent.
 - `pdf_extractor.py` uses PyMuPDF for validation and page-by-page text extraction.
 - `image_extractor.py` validates PNG/JPEG with Pillow and transcribes them with Tesseract OCR.
-- `chunking_service.py` does token-aware chunking (tiktoken) and records the page range of each chunk.
+- `chunking_service.py` does semantic chunking (sentence embeddings + similarity breakpoints, token caps and overlap) and records the page range of each chunk.
 - `embedding_service.py` calls `AsyncOpenAI` with batching, bounded retries with backoff, and order and dimension validation.
 - `ingestion_service.py` orchestrates the steps from claiming a document through to marking it ready or failed.
 - `job_runner.py` provides the `IngestionJobRunner` protocol and its `BackgroundTasks` implementation.
@@ -57,7 +57,7 @@ These are the backend services in `backend/app/services/`:
 - Python 3.12+ (`uv` recommended, plain `pip` works too)
 - A Supabase project (PostgreSQL with pgvector, plus Storage)
 - An OpenAI API key
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for PNG/JPEG ingestion
+- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for PNG/JPEG and PDF page/figure OCR
   (`sudo apt install tesseract-ocr` on Debian/Ubuntu). Unit tests mock OCR and do not need it.
 - Optional: Docker, or `pgserver`, for a local Postgres+pgvector used by the database tests
 
@@ -90,7 +90,8 @@ cp frontend/.env.example frontend/.env     # only STREAMLIT_API_URL
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | - | Backend only. **Never give the service-role key to Streamlit.** |
 | `SUPABASE_STORAGE_BUCKET` | `documents` | |
 | `MAX_UPLOAD_SIZE_MB` | `25` | |
-| `CHUNK_SIZE_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `650` / `100` | |
+| `CHUNK_SIZE_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `650` / `100` | Max chunk size and overlap after semantic grouping |
+| `SEMANTIC_CHUNK_BREAKPOINT_PERCENTILE` | `0.25` | Prefer splits where consecutive sentence similarity is at or below this document percentile |
 | `INGESTION_STALE_AFTER_SECONDS` | `900` | After this, a `processing` job counts as crashed and can be reclaimed |
 | `AUTH_MODE` / `DEV_OWNER_ID` | `development` / fixed UUID | Development identity. Rejected when `APP_ENV=production`. |
 | `APP_ENV`, `LOG_LEVEL`, `API_HOST`, `API_PORT` | | |
@@ -309,10 +310,11 @@ writing.
 
 **Chunking:**
 
-- Pages are split into paragraphs, then sentences.
-- Sentences longer than the chunk size are split on words.
-- Chunks are packed greedily up to `CHUNK_SIZE_TOKENS`. Each chunk starts with whole trailing
-  sentences from the previous one, up to `CHUNK_OVERLAP_TOKENS`.
+- Pages are split into paragraphs, then sentences (units for embedding only).
+- Each sentence is embedded; low consecutive cosine similarity (local minima at or below
+  `SEMANTIC_CHUNK_BREAKPOINT_PERCENTILE`) marks topic boundaries.
+- Segments are merged or split to respect `CHUNK_SIZE_TOKENS`; overlap uses trailing whole
+  units up to `CHUNK_OVERLAP_TOKENS`.
 - `page_start` and `page_end` are the minimum and maximum source pages in the chunk.
 - `token_count` is measured on the final text with the model's tiktoken encoding.
 
@@ -325,8 +327,12 @@ writing.
 - PostgreSQL and Storage aren't transactional together. The ordering above keeps failures
   recoverable, but a crash at exactly the wrong moment can leave an orphaned object. Orphans are
   logged as `orphaned_storage_object`.
-- Scanned PDFs still have no OCR: they fail with a clear message. Standalone PNG/JPEG files
-  are OCR'd with Tesseract (quality depends on the image). Photos with no readable text fail.
+- **PDF images:** pages with little extractable text are OCR'd from a rendered page bitmap;
+  on text-heavy pages, embedded raster images above a size threshold are OCR'd separately
+  (requires Tesseract, same as PNG/JPEG). Vector graphics, tables, and complex layouts are
+  **Tables** on pages with detectable grid structure are exported as markdown via
+  PyMuPDF ``find_tables`` (borderless or scanned tables may still be missed).
+  Standalone PNG/JPEG files are OCR'd as a single page.
 - The whole PDF is processed in one pass. Very large documents (thousands of pages) would
   benefit from streaming chunk persistence.
 - A single development identity, with no auth UI.

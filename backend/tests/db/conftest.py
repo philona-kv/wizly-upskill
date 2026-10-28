@@ -202,7 +202,7 @@ def ingestion(session_factory, storage, embedder) -> IngestionService:
     return IngestionService(
         session_factory,
         storage,
-        ChunkingService(chunk_size=120, overlap=20),
+        ChunkingService(120, 20, embedder),
         embedder,
         stale_after_seconds=900,
     )

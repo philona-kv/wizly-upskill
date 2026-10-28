@@ -27,6 +27,7 @@ from app.core.exceptions import AppError, DocumentExtractionError, StorageObject
 from app.repositories.document_repository import DocumentRepository
 from app.services.chunking_service import ChunkingService
 from app.services.document_extractor import extract_document
+from app.services.pdf_extractor import PdfExtractOptions
 from app.services.embedding_service import Embedder
 from app.services.file_types import kind_from_storage_path
 from app.services.storage_service import StorageService
@@ -52,12 +53,14 @@ class IngestionService:
         embedder: Embedder,
         *,
         stale_after_seconds: int,
+        pdf_extract_options: PdfExtractOptions | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
         self._chunker = chunker
         self._embedder = embedder
         self._stale_after = timedelta(seconds=stale_after_seconds)
+        self._pdf_extract_options = pdf_extract_options or PdfExtractOptions()
 
     def stale_before(self) -> datetime:
         return datetime.now(UTC) - self._stale_after
@@ -92,12 +95,17 @@ class IngestionService:
                 size = await self._storage.download_to(storage_path, tmp)
                 logger.info("ingestion_stage", extra={**log, "stage": stage, "bytes": size})
                 stage = "extract"
-                extracted = await asyncio.to_thread(extract_document, Path(tmp.name), kind)
+                extracted = await asyncio.to_thread(
+                    extract_document,
+                    Path(tmp.name),
+                    kind,
+                    pdf_options=self._pdf_extract_options,
+                )
             page_count = extracted.page_count
             logger.info("ingestion_stage", extra={**log, "stage": stage, "pages": page_count})
 
             stage = "chunk"
-            chunks = await asyncio.to_thread(self._chunker.chunk, extracted.pages)
+            chunks = await self._chunker.chunk(extracted.pages)
             del extracted
             if not chunks:
                 raise DocumentExtractionError(

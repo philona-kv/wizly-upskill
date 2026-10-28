@@ -124,7 +124,15 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = Field(default=25, gt=0)
     chunk_size_tokens: int = Field(default=650, gt=0)
     chunk_overlap_tokens: int = Field(default=100, ge=0)
+    semantic_chunk_breakpoint_percentile: float = Field(default=0.25, ge=0.0, le=1.0)
     ingestion_stale_after_seconds: int = Field(default=900, gt=0)
+    pdf_page_ocr_enabled: bool = True
+    pdf_page_ocr_scale: float = Field(default=2.0, gt=0.0, le=4.0)
+    pdf_page_ocr_min_text_chars: int = Field(default=20, ge=0)
+    pdf_embedded_image_ocr_enabled: bool = True
+    pdf_embedded_image_min_pixels: int = Field(default=4096, ge=0)
+    pdf_max_embedded_images_per_page: int = Field(default=5, ge=0, le=20)
+    pdf_table_extraction_enabled: bool = True
 
     auth_mode: AuthMode = AuthMode.DEVELOPMENT
     dev_owner_id: uuid.UUID = uuid.UUID("00000000-0000-0000-0000-000000000001")

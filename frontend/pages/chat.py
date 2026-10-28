@@ -128,11 +128,13 @@ with st.sidebar:
         with st.expander("Conversation summary"):
             try:
                 summary = client.get_conversation_summary(str(state.conversation_id))
-                st.markdown(summary.get("summary_text") or "_No summary yet._")
-                st.caption(f"Version {summary.get('version', 0)}")
             except ApiError as exc:
-                if exc.status_code != 404:
-                    st.caption(f"Summary unavailable: {exc.message}")
+                st.caption(f"Summary unavailable: {exc.message}")
+            else:
+                text = summary.get("summary_text")
+                if text:
+                    st.markdown(text)
+                    st.caption(f"Version {summary.get('version', 0)}")
                 else:
                     st.caption("No summary yet — summaries update after enough messages.")
 

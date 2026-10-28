@@ -171,11 +171,22 @@ async def test_image_without_text_fails_ingestion(client, monkeypatch) -> None:
     assert "No extractable text" in status["error_message"]
 
 
-async def test_pdf_without_text_fails_ingestion_clearly(client) -> None:
+async def test_scanned_pdf_ingests_when_ocr_returns_text(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.image_extractor.ocr_image",
+        lambda _img: "Scanned page text with enough characters for ingestion.",
+    )
+    body = (await _upload(client, make_image_only_pdf())).json()
+    status = (await client.get(f"/api/v1/documents/{body['document_id']}/status")).json()
+    assert status["status"] == "ready"
+
+
+async def test_scanned_pdf_fails_when_ocr_is_empty(client, monkeypatch) -> None:
+    monkeypatch.setattr("app.services.image_extractor.ocr_image", lambda _img: "")
     body = (await _upload(client, make_image_only_pdf())).json()
     status = (await client.get(f"/api/v1/documents/{body['document_id']}/status")).json()
     assert status["status"] == "failed"
-    assert "OCR" in status["error_message"]
+    assert "No extractable text" in status["error_message"]
 
 
 async def test_duplicate_upload_returns_existing(

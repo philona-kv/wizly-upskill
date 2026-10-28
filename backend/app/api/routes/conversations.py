@@ -19,7 +19,7 @@ from app.schemas.conversation import (
     MessageList,
     message_read,
 )
-from app.schemas.summary import SummaryRead
+from app.schemas.summary import ConversationSummaryState
 from app.schemas.workflow import WorkflowExecutionRead
 
 router = APIRouter()
@@ -116,20 +116,26 @@ async def send_message(
 
 @router.get(
     "/{conversation_id}/summary",
-    response_model=SummaryRead,
-    responses={**_ERRORS, 404: {"description": "No summary yet"}},
+    response_model=ConversationSummaryState,
+    responses={**_ERRORS, 404: {"description": "Conversation not found"}},
 )
 async def get_conversation_summary(
     conversation_id: uuid.UUID,
     principal: PrincipalDep,
     session: DbSessionDep,
     summary_service: SummaryServiceDep,
-) -> SummaryRead:
+) -> ConversationSummaryState:
     await _owned(session, principal, conversation_id)
     summary = await summary_service.get_summary(principal.owner_id, conversation_id)
     if summary is None:
-        raise NotFoundError("Conversation summary not found.")
-    return summary
+        return ConversationSummaryState(conversation_id=conversation_id)
+    return ConversationSummaryState(
+        conversation_id=conversation_id,
+        summary_text=summary.summary_text,
+        version=summary.version,
+        summarized_message_count=summary.summarized_message_count,
+        updated_at=summary.updated_at,
+    )
 
 
 @router.get(
